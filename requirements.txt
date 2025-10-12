@@ -1,0 +1,12 @@
+# Bluesky API
+atproto>=0.0.40
+
+# Anthropic Claude
+anthropic>=0.21.0
+
+# Web Scraping
+requests>=2.31.0
+beautifulsoup4>=4.12.0
+
+# Umgebungsvariablen
+python-dotenv>=1.0.0
