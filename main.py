@@ -4,6 +4,8 @@ warnings.filterwarnings('ignore', category=UserWarning, module='pydantic')
 import os
 from dotenv import load_dotenv
 
+import anthropic
+
 # .env laden
 load_dotenv()
 
@@ -66,13 +68,47 @@ def test_bluesky_connection():
     except Exception as e:
         print(f"❌ Fehler beim Login: {e}")
         return None
+    
+def test_claude_api():
+    """Testet die Claude API"""
+    print("\n🔄 Teste Claude API...")
+    
+    api_key = os.getenv('ANTHROPIC_API_KEY')
+    
+    if not api_key:
+        print("❌ ANTHROPIC_API_KEY fehlt in .env")
+        return False
+    
+    try:
+        client = anthropic.Anthropic(api_key=api_key)
+        
+        message = client.messages.create(
+            model="claude-haiku-3.5",
+            max_tokens=100,
+            messages=[{
+                "role": "user",
+                "content": "Antworte mit genau einem Satz: Funktioniert die API?"
+            }]
+        )
+        
+        response = message.content[0].text
+        print(f"✅ Claude antwortet: {response}")
+        return True
+        
+    except Exception as e:
+        print(f"❌ Fehler bei Claude: {e}")
+        return False
 
 if __name__ == "__main__":
     print("=== Sagemate Bot - Debug & Test ===\n")
     
     # Erst debuggen
     if debug_env_vars():
-        # Dann Verbindung testen
+        # Dann Bluesky testen
         client = test_bluesky_connection()
+        
+        # NEU: Jetzt auch Claude testen
+        if client:
+            test_claude_api()
     else:
         print("⚠️ Bitte .env Datei prüfen und Keys eintragen!")
