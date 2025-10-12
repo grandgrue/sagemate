@@ -83,7 +83,7 @@ def test_claude_api():
         client = anthropic.Anthropic(api_key=api_key)
         
         message = client.messages.create(
-            model="claude-haiku-3.5",
+            model="claude-3-haiku-20240307",  # ← KORRIGIERT!
             max_tokens=100,
             messages=[{
                 "role": "user",
@@ -98,6 +98,7 @@ def test_claude_api():
     except Exception as e:
         print(f"❌ Fehler bei Claude: {e}")
         return False
+    
 
 if __name__ == "__main__":
     print("=== Sagemate Bot - Debug & Test ===\n")
