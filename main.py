@@ -59,8 +59,8 @@ def load_system_prompt():
         return "Du bist ein hilfreicher Assistent auf Bluesky. Antworte kurz und prägnant."
 
 def generate_response_with_claude(post_text, url_content=None):
-    """Generiert Antwort mit Claude unter Verwendung des System-Prompts"""
-    print("🤖 Generiere Antwort mit Claude...")
+    """Generiert Antwort mit Claude Sonnet 4.5"""
+    print("🤖 Generiere Antwort mit Claude Sonnet 4.5...")
     
     api_key = os.getenv('ANTHROPIC_API_KEY')
     client = anthropic.Anthropic(api_key=api_key)
@@ -76,20 +76,20 @@ Post: {post_text}
 
 Webseiten-Inhalt (gekürzt): {url_content}
 
-WICHTIG: Deine Antwort darf maximal 280 Zeichen lang sein! Sei extrem prägnant.
+WICHTIG: Deine Antwort darf maximal 280 Zeichen lang sein! Sei prägnant aber informativ.
 Schreibe eine hilfreiche Antwort."""
     else:
         user_prompt = f"""Ein Nutzer hat folgenden Post geschrieben:
 
 {post_text}
 
-WICHTIG: Deine Antwort darf maximal 280 Zeichen lang sein! Sei extrem prägnant.
+WICHTIG: Deine Antwort darf maximal 280 Zeichen lang sein! Sei prägnant aber informativ.
 Schreibe eine hilfreiche Antwort."""
     
     try:
         message = client.messages.create(
-            model="claude-3-haiku-20240307",
-            max_tokens=150,  # Reduziert von 300 auf 150
+            model="claude-sonnet-4-5-20250929",  # Sonnet 4.5
+            max_tokens=200,
             system=system_prompt,
             messages=[{
                 "role": "user",
@@ -104,94 +104,6 @@ Schreibe eine hilfreiche Antwort."""
     except Exception as e:
         print(f"❌ Fehler bei Claude: {e}")
         return None
-
-def generate_response_with_model(post_text, url_content, model_name, prefix):
-    """Generiert Antwort mit einem spezifischen Claude-Modell"""
-    print(f"🤖 Generiere Antwort mit {model_name}...")
-    
-    api_key = os.getenv('ANTHROPIC_API_KEY')
-    client = anthropic.Anthropic(api_key=api_key)
-    
-    # System-Prompt laden
-    system_prompt = load_system_prompt()
-    
-    # User-Prompt zusammenstellen
-    if url_content:
-        user_prompt = f"""Ein Nutzer hat folgenden Post geschrieben und dabei auf eine Webseite verlinkt:
-
-Post: {post_text}
-
-Webseiten-Inhalt (gekürzt): {url_content}
-
-WICHTIG: Deine Antwort darf maximal 250 Zeichen lang sein (inkl. Präfix)! Sei extrem prägnant.
-Schreibe eine hilfreiche Antwort."""
-    else:
-        user_prompt = f"""Ein Nutzer hat folgenden Post geschrieben:
-
-{post_text}
-
-WICHTIG: Deine Antwort darf maximal 250 Zeichen lang sein (inkl. Präfix)! Sei extrem prägnant.
-Schreibe eine hilfreiche Antwort."""
-    
-    try:
-        # Max tokens je nach Modell anpassen
-        max_tokens = 100 if "haiku" in model_name else 200
-        
-        message = client.messages.create(
-            model=model_name,
-            max_tokens=max_tokens,
-            system=system_prompt,
-            messages=[{
-                "role": "user",
-                "content": user_prompt
-            }]
-        )
-        
-        response = message.content[0].text
-        
-        # Füge Präfix hinzu
-        prefixed_response = f"{prefix} {response}"
-        
-        print(f"✅ Antwort: {prefixed_response[:80]}...")
-        return prefixed_response
-        
-    except Exception as e:
-        print(f"❌ Fehler bei {model_name}: {e}")
-        return None
-
-def generate_dual_responses(post_text, url_content=None):
-    """Generiert zwei Antworten: Eine mit Haiku, eine mit Sonnet"""
-    print("\n🎭 Generiere zwei Antworten (Lehrling & Meisterin)...\n")
-    
-    responses = []
-    
-    # Modell-Konfiguration aus .env oder Defaults
-    models = [
-        {
-            "name": os.getenv("APPRENTICE_MODEL", "claude-3-haiku-20240307"),
-            "prefix": "🎓 Lehrling:",
-            "label": "Haiku"
-        },
-        {
-            "name": os.getenv("MASTER_MODEL", "claude-sonnet-4.5-20250929"),
-            "prefix": "👑 Meisterin:",
-            "label": "Sonnet 4.5"
-        }
-    ]
-    
-    for model in models:
-        print(f"--- {model['label']} ---")
-        response = generate_response_with_model(
-            post_text, 
-            url_content, 
-            model["name"], 
-            model["prefix"]
-        )
-        if response:
-            responses.append(response)
-        print()
-    
-    return responses
 
 def test_response_generation():
     """Testet die Antwort-Generierung"""
@@ -412,7 +324,7 @@ def mark_notification_as_read(client):
 
 
 def process_mention(client, mention):
-    """Verarbeitet eine einzelne Mention: URL laden → LLM → Zwei Antworten posten"""
+    """Verarbeitet eine einzelne Mention: URL laden → LLM → Antworten"""
     print(f"\n{'='*60}")
     print(f"📬 Neue Mention von @{mention['author']}")
     print(f"📝 Text: {mention['text']}")
@@ -426,27 +338,21 @@ def process_mention(client, mention):
         print(f"\n🔗 {len(urls)} URL(s) gefunden")
         url_content = fetch_url_content(urls[0])
     
-    # 2. Generiere ZWEI Antworten (Haiku + Sonnet)
-    responses = generate_dual_responses(mention['text'], url_content)
+    # 2. Generiere Antwort mit Claude Sonnet
+    print("\n🤖 Frage Claude Sonnet nach Antwort...")
+    response = generate_response_with_claude(mention['text'], url_content)
     
-    if not responses:
-        print("❌ Keine Antworten generiert - überspringe")
+    if not response:
+        print("❌ Keine Antwort generiert - überspringe")
         return False
     
-    # 3. Poste beide Antworten auf Bluesky
-    print(f"\n📤 Poste {len(responses)} Antwort(en)...\n")
+    # 3. Poste Antwort auf Bluesky
+    success = reply_to_mention(client, mention, response)
     
-    success_count = 0
-    for i, response in enumerate(responses, 1):
-        print(f"[{i}/{len(responses)}]")
-        if reply_to_mention(client, mention, response):
-            success_count += 1
-        time.sleep(2)  # 2 Sekunden Pause zwischen Posts
+    if success:
+        print(f"\n✅ Mention erfolgreich verarbeitet!")
     
-    if success_count > 0:
-        print(f"\n✅ {success_count}/{len(responses)} Antwort(en) erfolgreich gepostet!")
-    
-    return success_count > 0
+    return success
 
 def process_all_mentions(client):
     """Verarbeitet alle neuen Mentions"""
