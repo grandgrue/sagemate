@@ -6,6 +6,7 @@ from dotenv import load_dotenv
 import re
 import requests
 from bs4 import BeautifulSoup
+import time
 
 import anthropic
 
@@ -398,28 +399,77 @@ def test_full_workflow():
     
     return True
 
-if __name__ == "__main__":
-    print("=== Sagemate Bot - Vollständiger Test ===\n")
+
+def run_bot_continuously(client, check_interval=60):
+    """Lässt den Bot dauerhaft laufen und prüft regelmäßig auf Mentions"""
+    print("\n" + "="*60)
+    print(f"🤖 BOT LÄUFT DAUERHAFT")
+    print(f"⏰ Prüft alle {check_interval} Sekunden auf neue Mentions")
+    print("="*60)
+    print("💡 Drücke Ctrl+C um zu stoppen\n")
     
-    # Test 1: Umgebungsvariablen
+    iteration = 0
+    
+    try:
+        while True:  # Endlosschleife
+            iteration += 1
+            from datetime import datetime
+            timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            
+            print(f"\n⏰ [{timestamp}] Check #{iteration}")
+            
+            # Verarbeite alle neuen Mentions
+            count = process_all_mentions(client)
+            
+            if count > 0:
+                print(f"✅ {count} Mention(s) bearbeitet")
+            
+            # Warte bis zum nächsten Check
+            print(f"😴 Schlafe {check_interval} Sekunden...")
+            time.sleep(check_interval)
+            
+    except KeyboardInterrupt:
+        print("\n\n🛑 Bot wurde manuell gestoppt (Ctrl+C)")
+    except Exception as e:
+        print(f"\n❌ Unerwarteter Fehler: {e}")
+        print("⏳ Warte 60 Sekunden und versuche es erneut...")
+        time.sleep(60)
+        # Rekursiver Aufruf um Bot am Laufen zu halten
+        run_bot_continuously(client, check_interval)
+
+
+
+if __name__ == "__main__":
+    import sys
+    
+    print("=== Sagemate Bot ===\n")
+    
+    # Umgebungsvariablen prüfen
     if not debug_env_vars():
         print("⚠️ Bitte .env Datei prüfen!")
         exit(1)
     
-    # Test 2: Bluesky-Verbindung
+    # Bluesky Login
     client = test_bluesky_connection()
     if not client:
+        print("❌ Konnte nicht bei Bluesky einloggen")
         exit(1)
     
-    # Test 3: Claude API
+    # Claude API Test
     if not test_claude_api():
+        print("❌ Claude API funktioniert nicht")
         exit(1)
     
-    # NEU: Test 4 - Kompletter Workflow
-    print("\n" + "="*60)
-    print("🚀 STARTE VOLLSTÄNDIGEN WORKFLOW-TEST")
-    print("="*60)
+    print("\n✅ Alle Verbindungen erfolgreich!\n")
     
-    test_full_workflow()
-    
-    print("\n✅ Alle Tests abgeschlossen!")
+    # Entscheide: Einmal oder Dauerbetrieb?
+    if "--continuous" in sys.argv or os.getenv('BOT_MODE') == 'continuous':
+        # Dauerbetrieb (für Railway)
+        check_interval = int(os.getenv('CHECK_INTERVAL', '60'))
+        run_bot_continuously(client, check_interval=check_interval)
+    else:
+        # Einmal durchlaufen (Test-Modus)
+        print("📋 TEST-MODUS (einmalig)")
+        print("💡 Für Dauerbetrieb: python main.py --continuous\n")
+        test_full_workflow()
+        print("\n✅ Test abgeschlossen!")
