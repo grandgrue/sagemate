@@ -75,19 +75,21 @@ Post: {post_text}
 
 Webseiten-Inhalt (gekürzt): {url_content}
 
+WICHTIG: Deine Antwort darf maximal 280 Zeichen lang sein! Sei extrem prägnant.
 Schreibe eine hilfreiche Antwort."""
     else:
         user_prompt = f"""Ein Nutzer hat folgenden Post geschrieben:
 
 {post_text}
 
+WICHTIG: Deine Antwort darf maximal 280 Zeichen lang sein! Sei extrem prägnant.
 Schreibe eine hilfreiche Antwort."""
     
     try:
         message = client.messages.create(
             model="claude-3-haiku-20240307",
-            max_tokens=300,
-            system=system_prompt,  # ← Hier wird der System-Prompt übergeben!
+            max_tokens=150,  # Reduziert von 300 auf 150
+            system=system_prompt,
             messages=[{
                 "role": "user",
                 "content": user_prompt
@@ -115,6 +117,20 @@ def test_response_generation():
         print(f"💬 Bot-Antwort: {response}\n")
     
     return response is not None
+
+def truncate_for_bluesky(text, max_length=280):
+    """
+    Kürzt Text auf Bluesky-sichere Länge
+    Bluesky zählt Grapheme, nicht einfache Zeichen
+    """
+    # Zähle Grapheme (approximativ - echte Grapheme sind komplexer)
+    # Für Sicherheit nutzen wir einfache Zeichenlänge
+    if len(text) <= max_length:
+        return text
+    
+    # Kürze auf max_length - 3 und füge "..." hinzu
+    truncated = text[:max_length - 3].rsplit(' ', 1)[0]  # Schneide beim letzten Wort
+    return truncated + "..."
 
 def get_recent_mentions(client):
     """Holt die neuesten Mentions"""
@@ -262,12 +278,19 @@ def fetch_url_content(url):
     
 def reply_to_mention(client, mention, reply_text):
     """Antwortet auf eine Mention"""
-    print(f"💬 Poste Antwort: {reply_text[:60]}...")
+    
+    # Sicherheit: Kürze auf Bluesky-Limit
+    safe_text = truncate_for_bluesky(reply_text, max_length=280)
+    
+    if len(reply_text) > len(safe_text):
+        print(f"⚠️ Antwort war zu lang ({len(reply_text)} Zeichen) - gekürzt auf {len(safe_text)}")
+    
+    print(f"💬 Poste Antwort ({len(safe_text)} Zeichen): {safe_text[:60]}...")
     
     try:
         # Erstelle Reply auf Bluesky
         client.send_post(
-            text=reply_text,
+            text=safe_text,
             reply_to={
                 'root': {
                     'uri': mention['uri'],
