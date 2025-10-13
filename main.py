@@ -3,6 +3,9 @@ warnings.filterwarnings('ignore', category=UserWarning, module='pydantic')
 
 import os
 from dotenv import load_dotenv
+import re
+import requests
+from bs4 import BeautifulSoup
 
 import anthropic
 
@@ -218,8 +221,162 @@ def test_claude_api():
         return False
     
 
+def extract_urls(text):
+    """Extrahiert URLs aus einem Text"""
+    url_pattern = r'https?://[^\s]+'
+    urls = re.findall(url_pattern, text)
+    return urls
+
+def fetch_url_content(url):
+    """Holt den Inhalt einer Webseite"""
+    print(f"🔗 Lade Webseite: {url}")
+    
+    try:
+        headers = {
+            'User-Agent': 'Mozilla/5.0 (compatible; SagemateBot/1.0)'
+        }
+        response = requests.get(url, timeout=10, headers=headers)
+        response.raise_for_status()
+        
+        soup = BeautifulSoup(response.text, 'html.parser')
+        
+        # Entferne Scripts, Styles, Navigation, etc.
+        for tag in soup(['script', 'style', 'nav', 'footer', 'header', 'aside']):
+            tag.decompose()
+        
+        # Hole Text
+        text = soup.get_text()
+        
+        # Bereinige Leerzeichen
+        lines = (line.strip() for line in text.splitlines())
+        text = '\n'.join(line for line in lines if line)
+        
+        # Begrenze auf 3000 Zeichen (Kosten sparen!)
+        content = text[:3000]
+        print(f"✅ Webseite geladen: {len(content)} Zeichen")
+        return content
+        
+    except Exception as e:
+        print(f"⚠️ Fehler beim Laden der URL: {e}")
+        return None
+    
+def reply_to_mention(client, mention, reply_text):
+    """Antwortet auf eine Mention"""
+    print(f"💬 Poste Antwort: {reply_text[:60]}...")
+    
+    try:
+        # Erstelle Reply auf Bluesky
+        client.send_post(
+            text=reply_text,
+            reply_to={
+                'root': {
+                    'uri': mention['uri'],
+                    'cid': mention['cid']
+                },
+                'parent': {
+                    'uri': mention['uri'],
+                    'cid': mention['cid']
+                }
+            }
+        )
+        
+        print("✅ Antwort erfolgreich gepostet!")
+        return True
+        
+    except Exception as e:
+        print(f"❌ Fehler beim Posten: {e}")
+        return False
+
+def mark_notification_as_read(client):
+    """Markiert alle Notifications als gelesen"""
+    try:
+        from datetime import datetime
+        client.app.bsky.notification.update_seen({
+            'seen_at': datetime.now().isoformat() + 'Z'
+        })
+        print("✅ Notifications als gelesen markiert")
+    except Exception as e:
+        print(f"⚠️ Konnte Notifications nicht als gelesen markieren: {e}")
+
+
+def process_mention(client, mention):
+    """Verarbeitet eine einzelne Mention: URL laden → LLM → Antworten"""
+    print(f"\n{'='*60}")
+    print(f"📬 Neue Mention von @{mention['author']}")
+    print(f"📝 Text: {mention['text']}")
+    print(f"{'='*60}")
+    
+    # 1. Prüfe auf URLs im Post
+    urls = extract_urls(mention['text'])
+    url_content = None
+    
+    if urls:
+        print(f"\n🔗 {len(urls)} URL(s) gefunden")
+        # Nur erste URL verarbeiten (Kosten sparen)
+        url_content = fetch_url_content(urls[0])
+    
+    # 2. Generiere Antwort mit Claude
+    print("\n🤖 Frage Claude nach Antwort...")
+    response = generate_response_with_claude(mention['text'], url_content)
+    
+    if not response:
+        print("❌ Keine Antwort generiert - überspringe")
+        return False
+    
+    # 3. Poste Antwort auf Bluesky
+    success = reply_to_mention(client, mention, response)
+    
+    if success:
+        print(f"\n✅ Mention erfolgreich verarbeitet!")
+    
+    return success
+
+def process_all_mentions(client):
+    """Verarbeitet alle neuen Mentions"""
+    print("\n" + "="*60)
+    print("🔍 SUCHE NACH NEUEN MENTIONS")
+    print("="*60)
+    
+    # Hole Mentions
+    mentions = get_recent_mentions(client)
+    
+    if not mentions:
+        print("📭 Keine neuen Mentions gefunden")
+        return 0
+    
+    # Verarbeite jede Mention
+    successful = 0
+    for i, mention in enumerate(mentions, 1):
+        print(f"\n[{i}/{len(mentions)}]")
+        if process_mention(client, mention):
+            successful += 1
+    
+    # Markiere als gelesen
+    mark_notification_as_read(client)
+    
+    print(f"\n{'='*60}")
+    print(f"✅ {successful}/{len(mentions)} Mentions erfolgreich verarbeitet")
+    print(f"{'='*60}\n")
+    
+    return successful
+
+
+def test_full_workflow():
+    """Testet den kompletten Workflow: Mentions holen → Antworten"""
+    print("\n🧪 TESTE KOMPLETTEN WORKFLOW\n")
+    
+    # Login
+    client = test_bluesky_connection()
+    if not client:
+        return False
+    
+    # Verarbeite alle Mentions
+    process_all_mentions(client)
+    
+    return True
+
 if __name__ == "__main__":
-    print("=== Sagemate Bot - Tests ===\n")
+    print("=== Sagemate Bot - Vollständiger Test ===\n")
     
     # Test 1: Umgebungsvariablen
     if not debug_env_vars():
@@ -235,11 +392,11 @@ if __name__ == "__main__":
     if not test_claude_api():
         exit(1)
     
-    # Test 4: Antwort-Generierung mit System-Prompt
-    if not test_response_generation():
-        exit(1)
+    # NEU: Test 4 - Kompletter Workflow
+    print("\n" + "="*60)
+    print("🚀 STARTE VOLLSTÄNDIGEN WORKFLOW-TEST")
+    print("="*60)
     
-    # Test 5: Mentions abrufen
-    test_mentions()
+    test_full_workflow()
     
-    print("\n✅ Alle Tests erfolgreich!")
+    print("\n✅ Alle Tests abgeschlossen!")
