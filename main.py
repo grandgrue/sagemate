@@ -2,31 +2,28 @@ import warnings
 warnings.filterwarnings('ignore', category=UserWarning, module='pydantic')
 
 import os
-from dotenv import load_dotenv
 import re
+import time
 import requests
 from bs4 import BeautifulSoup
-import time
-
+from datetime import datetime
+from dotenv import load_dotenv
 import anthropic
+from atproto import Client
 
 # .env laden
 load_dotenv()
 
-# Proxy aus .env setzen
+# Proxy aus .env setzen (nur lokal nötig, nicht auf Railway)
 http_proxy = os.getenv('HTTP_PROXY')
 if http_proxy:
     os.environ['HTTP_PROXY'] = http_proxy
     os.environ['HTTPS_PROXY'] = os.getenv('HTTPS_PROXY', http_proxy)
-    print(f"🌐 Proxy aktiviert\n")
+    print(f"🌐 Proxy aktiviert: {http_proxy}\n")
 
-from atproto import Client
-
-# Umgebungsvariablen laden
-load_dotenv()
 
 def debug_env_vars():
-    """Prüft ob Umgebungsvariablen geladen sind"""
+    """Prüft ob alle benötigten Umgebungsvariablen vorhanden sind"""
     print("🔍 Prüfe Umgebungsvariablen...\n")
     
     handle = os.getenv('BLUESKY_HANDLE')
@@ -48,6 +45,7 @@ def debug_env_vars():
     print()
     return handle and password and api_key
 
+
 def load_system_prompt():
     """Lädt den System-Prompt aus Datei"""
     try:
@@ -55,8 +53,96 @@ def load_system_prompt():
             return f.read().strip()
     except FileNotFoundError:
         print("⚠️ system_prompt.txt nicht gefunden, nutze Standard-Prompt")
-        # Fallback-Prompt
         return "Du bist ein hilfreicher Assistent auf Bluesky. Antworte kurz und prägnant."
+
+
+def test_bluesky_connection():
+    """Testet die Verbindung zu Bluesky"""
+    print("🔄 Verbinde mit Bluesky...")
+    
+    client = Client()
+    handle = os.getenv('BLUESKY_HANDLE')
+    password = os.getenv('BLUESKY_PASSWORD')
+    
+    try:
+        client.login(handle, password)
+        print(f"✅ Erfolgreich eingeloggt als: {handle}")
+        
+        profile = client.get_profile(handle)
+        print(f"📊 Display Name: {profile.display_name}")
+        print(f"👥 Followers: {profile.followers_count}\n")
+        
+        return client
+    except Exception as e:
+        print(f"❌ Fehler beim Login: {e}")
+        return None
+
+
+def test_claude_api():
+    """Testet die Claude API mit Sonnet 4.5"""
+    print("🔄 Teste Claude API...")
+    
+    api_key = os.getenv('ANTHROPIC_API_KEY')
+    if not api_key:
+        print("❌ ANTHROPIC_API_KEY fehlt in .env")
+        return False
+    
+    try:
+        client = anthropic.Anthropic(api_key=api_key)
+        
+        message = client.messages.create(
+            model="claude-sonnet-4-5-20250929",
+            max_tokens=50,
+            messages=[{
+                "role": "user",
+                "content": "Antworte mit einem Wort: OK"
+            }]
+        )
+        
+        response = message.content[0].text
+        print(f"✅ Claude antwortet: {response}\n")
+        return True
+        
+    except Exception as e:
+        print(f"❌ Fehler bei Claude: {e}")
+        return False
+
+
+def extract_urls(text):
+    """Extrahiert URLs aus einem Text"""
+    url_pattern = r'https?://[^\s]+'
+    return re.findall(url_pattern, text)
+
+
+def fetch_url_content(url):
+    """Holt den Inhalt einer Webseite"""
+    print(f"🔗 Lade Webseite: {url}")
+    
+    try:
+        headers = {'User-Agent': 'Mozilla/5.0 (compatible; SagemateBot/1.0)'}
+        response = requests.get(url, timeout=10, headers=headers)
+        response.raise_for_status()
+        
+        soup = BeautifulSoup(response.text, 'html.parser')
+        
+        # Entferne Scripts, Styles, Navigation, etc.
+        for tag in soup(['script', 'style', 'nav', 'footer', 'header', 'aside']):
+            tag.decompose()
+        
+        # Hole und bereinige Text
+        text = soup.get_text()
+        lines = (line.strip() for line in text.splitlines())
+        text = '\n'.join(line for line in lines if line)
+        
+        # Begrenze auf 3000 Zeichen (Kosten sparen!)
+        content = text[:3000]
+        print(f"✅ Webseite geladen: {len(content)} Zeichen")
+        return content
+        
+    except Exception as e:
+        print(f"⚠️ Fehler beim Laden der URL: {e}")
+        return None
+
 
 def generate_response_with_claude(post_text, url_content=None):
     """Generiert Antwort mit Claude Sonnet 4.5"""
@@ -88,7 +174,7 @@ Schreibe eine hilfreiche Antwort."""
     
     try:
         message = client.messages.create(
-            model="claude-sonnet-4-5-20250929",  # Sonnet 4.5
+            model="claude-sonnet-4-5-20250929",
             max_tokens=200,
             system=system_prompt,
             messages=[{
@@ -105,45 +191,26 @@ Schreibe eine hilfreiche Antwort."""
         print(f"❌ Fehler bei Claude: {e}")
         return None
 
-def test_response_generation():
-    """Testet die Antwort-Generierung"""
-    print("\n🧪 Teste Antwort-Generierung...\n")
-    
-    # Test 1: Einfacher Post
-    test_post = "Hey @sagemate, kannst du mir Python erklären?"
-    response = generate_response_with_claude(test_post)
-    
-    if response:
-        print(f"\n📝 Test-Post: {test_post}")
-        print(f"💬 Bot-Antwort: {response}\n")
-    
-    return response is not None
 
 def truncate_for_bluesky(text, max_length=280):
-    """
-    Kürzt Text auf Bluesky-sichere Länge
-    Bluesky zählt Grapheme, nicht einfache Zeichen
-    """
-    # Zähle Grapheme (approximativ - echte Grapheme sind komplexer)
-    # Für Sicherheit nutzen wir einfache Zeichenlänge
+    """Kürzt Text auf Bluesky-sichere Länge (280 Zeichen)"""
     if len(text) <= max_length:
         return text
     
-    # Kürze auf max_length - 3 und füge "..." hinzu
-    truncated = text[:max_length - 3].rsplit(' ', 1)[0]  # Schneide beim letzten Wort
+    # Kürze beim letzten Wort und füge "..." hinzu
+    truncated = text[:max_length - 3].rsplit(' ', 1)[0]
     return truncated + "..."
 
+
 def get_recent_mentions(client):
-    """Holt die neuesten Mentions"""
-    print("\n📬 Prüfe auf neue Mentions...")
+    """Holt alle ungelesenen Mentions"""
+    print("📬 Prüfe auf neue Mentions...")
     
     try:
-        # Hole Notifications
         notifications = client.app.bsky.notification.list_notifications()
         
         mentions = []
         for notif in notifications.notifications:
-            # Nur Mentions, die noch nicht gelesen sind
             if notif.reason == 'mention' and not notif.is_read:
                 mentions.append({
                     'author': notif.author.handle,
@@ -163,123 +230,9 @@ def get_recent_mentions(client):
         print(f"❌ Fehler beim Abrufen von Mentions: {e}")
         return []
 
-def test_mentions():
-    """Testet das Abrufen von Mentions"""
-    print("\n🧪 Teste Mentions abrufen...\n")
-    
-    # Bluesky Login
-    client = test_bluesky_connection()
-    if not client:
-        return False
-    
-    # Mentions holen
-    mentions = get_recent_mentions(client)
-    
-    if mentions:
-        print("\n📋 Gefundene Mentions:")
-        for m in mentions:
-            print(f"  👤 @{m['author']}: {m['text'][:60]}...")
-    
-    return True
 
-def test_bluesky_connection():
-    """Testet die Verbindung zu Bluesky"""
-    print("🔄 Verbinde mit Bluesky...")
-    
-    # Bluesky Client erstellen
-    client = Client()
-    
-    # Login
-    handle = os.getenv('BLUESKY_HANDLE')
-    password = os.getenv('BLUESKY_PASSWORD')
-    
-    try:
-        client.login(handle, password)
-        print(f"✅ Erfolgreich eingeloggt als: {handle}")
-        
-        # Hole eigenes Profil
-        profile = client.get_profile(handle)
-        print(f"📊 Display Name: {profile.display_name}")
-        print(f"👥 Followers: {profile.followers_count}")
-        
-        return client
-    except Exception as e:
-        print(f"❌ Fehler beim Login: {e}")
-        return None
-    
-def test_claude_api():
-    """Testet die Claude API"""
-    print("\n🔄 Teste Claude API...")
-    
-    api_key = os.getenv('ANTHROPIC_API_KEY')
-    
-    if not api_key:
-        print("❌ ANTHROPIC_API_KEY fehlt in .env")
-        return False
-    
-    try:
-        client = anthropic.Anthropic(api_key=api_key)
-        
-        message = client.messages.create(
-            model="claude-3-haiku-20240307",  # ← KORRIGIERT!
-            max_tokens=100,
-            messages=[{
-                "role": "user",
-                "content": "Antworte mit genau einem Satz: Funktioniert die API?"
-            }]
-        )
-        
-        response = message.content[0].text
-        print(f"✅ Claude antwortet: {response}")
-        return True
-        
-    except Exception as e:
-        print(f"❌ Fehler bei Claude: {e}")
-        return False
-    
-
-def extract_urls(text):
-    """Extrahiert URLs aus einem Text"""
-    url_pattern = r'https?://[^\s]+'
-    urls = re.findall(url_pattern, text)
-    return urls
-
-def fetch_url_content(url):
-    """Holt den Inhalt einer Webseite"""
-    print(f"🔗 Lade Webseite: {url}")
-    
-    try:
-        headers = {
-            'User-Agent': 'Mozilla/5.0 (compatible; SagemateBot/1.0)'
-        }
-        response = requests.get(url, timeout=10, headers=headers)
-        response.raise_for_status()
-        
-        soup = BeautifulSoup(response.text, 'html.parser')
-        
-        # Entferne Scripts, Styles, Navigation, etc.
-        for tag in soup(['script', 'style', 'nav', 'footer', 'header', 'aside']):
-            tag.decompose()
-        
-        # Hole Text
-        text = soup.get_text()
-        
-        # Bereinige Leerzeichen
-        lines = (line.strip() for line in text.splitlines())
-        text = '\n'.join(line for line in lines if line)
-        
-        # Begrenze auf 3000 Zeichen (Kosten sparen!)
-        content = text[:3000]
-        print(f"✅ Webseite geladen: {len(content)} Zeichen")
-        return content
-        
-    except Exception as e:
-        print(f"⚠️ Fehler beim Laden der URL: {e}")
-        return None
-    
 def reply_to_mention(client, mention, reply_text):
     """Antwortet auf eine Mention"""
-    
     # Sicherheit: Kürze auf Bluesky-Limit
     safe_text = truncate_for_bluesky(reply_text, max_length=280)
     
@@ -289,18 +242,11 @@ def reply_to_mention(client, mention, reply_text):
     print(f"💬 Poste Antwort ({len(safe_text)} Zeichen): {safe_text[:60]}...")
     
     try:
-        # Erstelle Reply auf Bluesky
         client.send_post(
             text=safe_text,
             reply_to={
-                'root': {
-                    'uri': mention['uri'],
-                    'cid': mention['cid']
-                },
-                'parent': {
-                    'uri': mention['uri'],
-                    'cid': mention['cid']
-                }
+                'root': {'uri': mention['uri'], 'cid': mention['cid']},
+                'parent': {'uri': mention['uri'], 'cid': mention['cid']}
             }
         )
         
@@ -311,10 +257,10 @@ def reply_to_mention(client, mention, reply_text):
         print(f"❌ Fehler beim Posten: {e}")
         return False
 
+
 def mark_notification_as_read(client):
     """Markiert alle Notifications als gelesen"""
     try:
-        from datetime import datetime
         client.app.bsky.notification.update_seen({
             'seen_at': datetime.now().isoformat() + 'Z'
         })
@@ -354,6 +300,7 @@ def process_mention(client, mention):
     
     return success
 
+
 def process_all_mentions(client):
     """Verarbeitet alle neuen Mentions"""
     print("\n" + "="*60)
@@ -384,21 +331,6 @@ def process_all_mentions(client):
     return successful
 
 
-def test_full_workflow():
-    """Testet den kompletten Workflow: Mentions holen → Antworten"""
-    print("\n🧪 TESTE KOMPLETTEN WORKFLOW\n")
-    
-    # Login
-    client = test_bluesky_connection()
-    if not client:
-        return False
-    
-    # Verarbeite alle Mentions
-    process_all_mentions(client)
-    
-    return True
-
-
 def run_bot_continuously(client, check_interval=60):
     """Lässt den Bot dauerhaft laufen und prüft regelmäßig auf Mentions"""
     print("\n" + "="*60)
@@ -410,9 +342,8 @@ def run_bot_continuously(client, check_interval=60):
     iteration = 0
     
     try:
-        while True:  # Endlosschleife
+        while True:
             iteration += 1
-            from datetime import datetime
             timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
             
             print(f"\n⏰ [{timestamp}] Check #{iteration}")
@@ -437,8 +368,8 @@ def run_bot_continuously(client, check_interval=60):
         run_bot_continuously(client, check_interval)
 
 
-
-if __name__ == "__main__":
+def main():
+    """Hauptfunktion"""
     import sys
     
     print("=== Sagemate Bot ===\n")
@@ -459,7 +390,7 @@ if __name__ == "__main__":
         print("❌ Claude API funktioniert nicht")
         exit(1)
     
-    print("\n✅ Alle Verbindungen erfolgreich!\n")
+    print("✅ Alle Verbindungen erfolgreich!\n")
     
     # Entscheide: Einmal oder Dauerbetrieb?
     if "--continuous" in sys.argv or os.getenv('BOT_MODE') == 'continuous':
@@ -470,5 +401,9 @@ if __name__ == "__main__":
         # Einmal durchlaufen (Test-Modus)
         print("📋 TEST-MODUS (einmalig)")
         print("💡 Für Dauerbetrieb: python main.py --continuous\n")
-        test_full_workflow()
+        process_all_mentions(client)
         print("\n✅ Test abgeschlossen!")
+
+
+if __name__ == "__main__":
+    main()
