@@ -386,6 +386,62 @@ def get_recent_mentions(client):
         return []
 
 
+def is_mention_empty(mention_text, bot_handle):
+    """
+    Prüft ob eine Mention "leer" ist (nur Bot-Mention, kein substantieller Text)
+    
+    Args:
+        mention_text: Der Text der Mention
+        bot_handle: Der Handle des Bots (z.B. "sagemate.bsky.social")
+    """
+    # Entferne alle @mentions aus dem Text
+    text_without_mentions = re.sub(r'@[\w\.-]+', '', mention_text).strip()
+    
+    # Prüfe ob nach Entfernung der Mentions substantieller Text übrig bleibt
+    # Weniger als 3 Zeichen = leer
+    return len(text_without_mentions) < 3
+
+
+def get_parent_post(client, mention):
+    """
+    Holt den Parent-Post einer Reply (falls vorhanden)
+    
+    Returns:
+        Parent-Post Objekt oder None
+    """
+    try:
+        # Prüfe ob Mention ein reply_to hat
+        if not hasattr(mention['record'], 'reply'):
+            return None
+        
+        reply_info = mention['record'].reply
+        
+        # Hole Parent-Post URI
+        if hasattr(reply_info, 'parent') and hasattr(reply_info.parent, 'uri'):
+            parent_uri = reply_info.parent.uri
+            
+            print(f"🔗 Mention ist Reply auf anderen Post: {parent_uri}")
+            
+            # Hole den vollständigen Parent-Post
+            thread = client.get_post_thread(uri=parent_uri)
+            
+            if hasattr(thread, 'thread') and hasattr(thread.thread, 'post'):
+                parent_post = thread.thread.post
+                return {
+                    'author': parent_post.author.handle if hasattr(parent_post.author, 'handle') else 'unknown',
+                    'text': parent_post.record.text if hasattr(parent_post.record, 'text') else '',
+                    'uri': parent_uri,
+                    'cid': parent_post.cid if hasattr(parent_post, 'cid') else None,
+                    'record': parent_post.record
+                }
+        
+        return None
+        
+    except Exception as e:
+        print(f"⚠️ Fehler beim Holen des Parent-Posts: {e}")
+        return None
+
+
 def reply_to_mention(client, mention, reply_text, dry_run=False):
     """
     Antwortet auf eine Mention
@@ -447,11 +503,12 @@ def process_mention(client, mention, dry_run=False):
     Verarbeitet eine einzelne Mention mit vollem Kontext
     
     Workflow:
-    1. Thread-Context laden (alle vorherigen Posts)
-    2. URLs aus Mention UND Thread extrahieren (aus facets/embeds!)
-    3. Webseiten-Inhalte laden
-    4. Claude um Antwort bitten (mit Kontext + URLs)
-    5. Antwort auf Bluesky posten
+    1. Prüfe ob Mention leer ist & ob sie Reply auf anderen Post ist
+    2. Thread-Context laden (alle vorherigen Posts)
+    3. URLs aus Mention UND Thread extrahieren (aus facets/embeds!)
+    4. Webseiten-Inhalte laden
+    5. Claude um Antwort bitten (mit Kontext + URLs)
+    6. Antwort auf Bluesky posten (entweder auf Mention oder auf Original-Post)
     
     Args:
         dry_run: Wenn True, wird nicht wirklich auf Bluesky gepostet
@@ -461,8 +518,31 @@ def process_mention(client, mention, dry_run=False):
     print(f"📝 Text: {mention['text']}")
     print(f"{'='*60}")
     
+    # SPECIAL CASE: Leere Mention die auf anderen Post antwortet
+    bot_handle = os.getenv('BLUESKY_HANDLE')
+    reply_target = mention  # Default: Antworte auf Mention selbst
+    
+    if is_mention_empty(mention['text'], bot_handle):
+        print("\n🔍 Mention ist leer (nur @mention ohne Text)")
+        
+        parent_post = get_parent_post(client, mention)
+        
+        if parent_post:
+            print(f"✅ Bot wird auf Original-Post antworten:")
+            print(f"   @{parent_post['author']}: {parent_post['text'][:100]}...")
+            reply_target = parent_post
+            
+            # Nutze Text des Original-Posts als "Mention-Text" für Kontext
+            mention_text_for_claude = parent_post['text']
+        else:
+            print("⚠️ Kein Parent-Post gefunden, antworte auf Mention")
+            mention_text_for_claude = mention['text']
+    else:
+        mention_text_for_claude = mention['text']
+    
     # 1. Hole Thread-Context (alle Posts die zu dieser Konversation gehören)
-    thread_context = get_thread_context(client, mention['uri'])
+    # Nutze den reply_target URI (entweder Mention oder Parent)
+    thread_context = get_thread_context(client, reply_target['uri'])
     
     # LOGGING: Thread-Context anzeigen
     if thread_context and len(thread_context) > 0:
@@ -476,15 +556,15 @@ def process_mention(client, mention, dry_run=False):
     else:
         print("\n📭 Kein Thread-Context (direkte Mention ohne Vorgänger)")
     
-    # 2. Sammle URLs aus der Mention UND aus dem gesamten Thread
+    # 2. Sammle URLs aus der Mention/Parent UND aus dem gesamten Thread
     # WICHTIG: Nutze extract_urls_from_post() um URLs aus facets/embeds zu finden!
     all_urls = []
     
-    # URLs aus der aktuellen Mention
-    if 'record' in mention and mention['record']:
-        mention_urls = extract_urls_from_post(mention['record'])
-        all_urls.extend(mention_urls)
-        print(f"\n🔍 {len(mention_urls)} URL(s) in der Mention gefunden")
+    # URLs aus dem Reply-Target (Mention oder Parent)
+    if 'record' in reply_target and reply_target['record']:
+        target_urls = extract_urls_from_post(reply_target['record'])
+        all_urls.extend(target_urls)
+        print(f"\n🔍 {len(target_urls)} URL(s) im Ziel-Post gefunden")
     
     # URLs aus allen Thread-Posts
     if thread_context:
@@ -492,7 +572,7 @@ def process_mention(client, mention, dry_run=False):
             if 'record' in post and post['record']:
                 post_urls = extract_urls_from_post(post['record'])
                 all_urls.extend(post_urls)
-        print(f"🔍 Insgesamt {len(all_urls)} URL(s) in Mention + Thread")
+        print(f"🔍 Insgesamt {len(all_urls)} URL(s) in Thread")
     
     # Duplikate entfernen
     urls = list(set(all_urls))
@@ -519,7 +599,7 @@ def process_mention(client, mention, dry_run=False):
     # 3. Generiere Antwort mit Claude (mit vollem Kontext)
     print("\n🤖 Frage Claude Sonnet nach Antwort (mit Kontext)...")
     response = generate_response_with_claude(
-        mention['text'], 
+        mention_text_for_claude, 
         thread_context=thread_context,
         url_contents=url_contents if url_contents else None
     )
@@ -528,8 +608,8 @@ def process_mention(client, mention, dry_run=False):
         print("❌ Keine Antwort generiert - überspringe")
         return False
     
-    # 4. Poste Antwort auf Bluesky (oder simuliere im Dry-Run)
-    success = reply_to_mention(client, mention, response, dry_run=dry_run)
+    # 4. Poste Antwort auf Bluesky (auf reply_target - entweder Mention oder Parent)
+    success = reply_to_mention(client, reply_target, response, dry_run=dry_run)
     
     if success:
         print(f"\n✅ Mention erfolgreich verarbeitet!")
