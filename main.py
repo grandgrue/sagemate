@@ -115,6 +115,52 @@ def extract_urls(text):
     return re.findall(url_pattern, text)
 
 
+def extract_urls_from_post(post):
+    """
+    Extrahiert URLs aus einem Bluesky Post-Objekt
+    
+    Bluesky speichert URLs an mehreren Stellen:
+    1. Im Text selbst
+    2. In facets (strukturierte Link-Metadaten)
+    3. In embeds (Link-Cards, externe Inhalte)
+    """
+    urls = []
+    
+    # 1. URLs aus dem Text extrahieren
+    if hasattr(post, 'text'):
+        text_urls = extract_urls(post.text)
+        urls.extend(text_urls)
+    
+    # 2. URLs aus facets extrahieren (strukturierte Links)
+    if hasattr(post, 'facets') and post.facets:
+        for facet in post.facets:
+            if hasattr(facet, 'features'):
+                for feature in facet.features:
+                    # Link-Feature
+                    if hasattr(feature, 'uri'):
+                        urls.append(feature.uri)
+    
+    # 3. URLs aus embeds extrahieren (Link-Cards)
+    if hasattr(post, 'embed'):
+        embed = post.embed
+        
+        # External embed (Link-Card)
+        if hasattr(embed, 'external') and hasattr(embed.external, 'uri'):
+            urls.append(embed.external.uri)
+        
+        # Record embed (Quote-Post mit möglicherweise URLs)
+        if hasattr(embed, 'record'):
+            record = embed.record
+            if hasattr(record, 'uri'):
+                # Rekursiv URLs aus eingebettetem Post extrahieren
+                if hasattr(record, 'value'):
+                    nested_urls = extract_urls_from_post(record.value)
+                    urls.extend(nested_urls)
+    
+    # Duplikate entfernen und zurückgeben
+    return list(set(urls))
+
+
 def fetch_url_content_trafilatura(url):
     """Holt den Inhalt einer Webseite mit Trafilatura (bessere Extraktion)"""
     print(f"🔗 Lade Webseite mit Trafilatura: {url}")
@@ -188,7 +234,10 @@ def fetch_url_content(url):
 
 
 def get_thread_context(client, post_uri):
-    """Holt den kompletten Thread-Context eines Posts (alle vorherigen Antworten)"""
+    """
+    Holt den kompletten Thread-Context eines Posts (alle vorherigen Antworten)
+    Gibt Post-Objekte mit allen Metadaten zurück
+    """
     print(f"📜 Lade Thread-Context...")
     
     try:
@@ -209,7 +258,8 @@ def get_thread_context(client, post_uri):
                 context_posts.append({
                     'author': post.author.handle if hasattr(post.author, 'handle') else 'unknown',
                     'text': post.record.text if hasattr(post.record, 'text') else '',
-                    'created_at': post.record.created_at if hasattr(post.record, 'created_at') else ''
+                    'created_at': post.record.created_at if hasattr(post.record, 'created_at') else '',
+                    'record': post.record  # Speichere vollständiges record für URL-Extraktion
                 })
             
             # Parent-Posts rekursiv sammeln (gehe die Kette nach oben)
@@ -307,7 +357,7 @@ def truncate_for_bluesky(text, max_length=280):
 
 
 def get_recent_mentions(client):
-    """Holt alle ungelesenen Mentions"""
+    """Holt alle ungelesenen Mentions mit vollständigen Post-Daten"""
     print("📬 Prüfe auf neue Mentions...")
     
     try:
@@ -320,7 +370,8 @@ def get_recent_mentions(client):
                     'author': notif.author.handle,
                     'text': notif.record.text if hasattr(notif.record, 'text') else "",
                     'uri': notif.uri,
-                    'cid': notif.cid
+                    'cid': notif.cid,
+                    'record': notif.record  # Vollständiges record für URL-Extraktion
                 })
         
         if mentions:
@@ -397,7 +448,7 @@ def process_mention(client, mention, dry_run=False):
     
     Workflow:
     1. Thread-Context laden (alle vorherigen Posts)
-    2. URLs aus Mention UND Thread extrahieren
+    2. URLs aus Mention UND Thread extrahieren (aus facets/embeds!)
     3. Webseiten-Inhalte laden
     4. Claude um Antwort bitten (mit Kontext + URLs)
     5. Antwort auf Bluesky posten
@@ -425,17 +476,30 @@ def process_mention(client, mention, dry_run=False):
     else:
         print("\n📭 Kein Thread-Context (direkte Mention ohne Vorgänger)")
     
-    # 2. Sammle alle URLs aus der Mention UND aus dem gesamten Thread
-    all_text = mention['text']
-    if thread_context:
-        # Füge alle Thread-Posts zusammen um URLs zu finden
-        all_text += " " + " ".join([post['text'] for post in thread_context])
+    # 2. Sammle URLs aus der Mention UND aus dem gesamten Thread
+    # WICHTIG: Nutze extract_urls_from_post() um URLs aus facets/embeds zu finden!
+    all_urls = []
     
-    urls = extract_urls(all_text)
+    # URLs aus der aktuellen Mention
+    if 'record' in mention and mention['record']:
+        mention_urls = extract_urls_from_post(mention['record'])
+        all_urls.extend(mention_urls)
+        print(f"\n🔍 {len(mention_urls)} URL(s) in der Mention gefunden")
+    
+    # URLs aus allen Thread-Posts
+    if thread_context:
+        for post in thread_context:
+            if 'record' in post and post['record']:
+                post_urls = extract_urls_from_post(post['record'])
+                all_urls.extend(post_urls)
+        print(f"🔍 Insgesamt {len(all_urls)} URL(s) in Mention + Thread")
+    
+    # Duplikate entfernen
+    urls = list(set(all_urls))
     url_contents = {}
     
     if urls:
-        print(f"\n🔗 {len(urls)} URL(s) im Thread gefunden:")
+        print(f"\n🔗 {len(urls)} eindeutige URL(s) im Thread gefunden:")
         # Lade max. 3 URLs um Kosten/Zeit zu sparen
         for idx, url in enumerate(urls[:3], 1):
             print(f"\n  [{idx}] {url}")
@@ -500,7 +564,7 @@ def process_all_mentions(client, dry_run=False):
         if process_mention(client, mention, dry_run=dry_run):
             successful += 1
     
-    # Markiere als gelesen (auch im Dry-Run, um nicht immer dieselben zu sehen)
+    # Markiere als gelesen
     if not dry_run:
         mark_notification_as_read(client)
     else:
