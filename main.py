@@ -301,6 +301,7 @@ def truncate_for_bluesky(text, max_length=280):
     if len(text) <= max_length:
         return text
     
+    # Kürze beim letzten Wort und füge "..." hinzu
     truncated = text[:max_length - 3].rsplit(' ', 1)[0]
     return truncated + "..."
 
@@ -334,15 +335,34 @@ def get_recent_mentions(client):
         return []
 
 
-def reply_to_mention(client, mention, reply_text):
-    """Antwortet auf eine Mention"""
+def reply_to_mention(client, mention, reply_text, dry_run=False):
+    """
+    Antwortet auf eine Mention
+    
+    Args:
+        client: Bluesky Client
+        mention: Mention-Objekt
+        reply_text: Text der Antwort
+        dry_run: Wenn True, wird nicht wirklich gepostet (nur geloggt)
+    """
+    # Sicherheit: Kürze auf Bluesky-Limit
     safe_text = truncate_for_bluesky(reply_text, max_length=280)
     
     if len(reply_text) > len(safe_text):
         print(f"⚠️ Antwort war zu lang ({len(reply_text)} Zeichen) - gekürzt auf {len(safe_text)}")
     
-    print(f"💬 Poste Antwort ({len(safe_text)} Zeichen): {safe_text[:60]}...")
+    print(f"\n{'='*60}")
+    print(f"💬 ANTWORT ({len(safe_text)} Zeichen):")
+    print(f"{'='*60}")
+    print(safe_text)
+    print(f"{'='*60}\n")
     
+    # DRY RUN MODE - Nicht wirklich posten
+    if dry_run:
+        print("🧪 DRY RUN MODUS: Antwort wird NICHT gepostet!")
+        return True
+    
+    # Wirklich auf Bluesky posten
     try:
         client.send_post(
             text=safe_text,
@@ -371,7 +391,7 @@ def mark_notification_as_read(client):
         print(f"⚠️ Konnte Notifications nicht als gelesen markieren: {e}")
 
 
-def process_mention(client, mention):
+def process_mention(client, mention, dry_run=False):
     """
     Verarbeitet eine einzelne Mention mit vollem Kontext
     
@@ -381,6 +401,9 @@ def process_mention(client, mention):
     3. Webseiten-Inhalte laden
     4. Claude um Antwort bitten (mit Kontext + URLs)
     5. Antwort auf Bluesky posten
+    
+    Args:
+        dry_run: Wenn True, wird nicht wirklich auf Bluesky gepostet
     """
     print(f"\n{'='*60}")
     print(f"📬 Neue Mention von @{mention['author']}")
@@ -389,6 +412,18 @@ def process_mention(client, mention):
     
     # 1. Hole Thread-Context (alle Posts die zu dieser Konversation gehören)
     thread_context = get_thread_context(client, mention['uri'])
+    
+    # LOGGING: Thread-Context anzeigen
+    if thread_context and len(thread_context) > 0:
+        print(f"\n📜 THREAD-CONTEXT ({len(thread_context)} Posts):")
+        print("="*60)
+        for i, post in enumerate(thread_context, 1):
+            print(f"{i}. @{post['author']}:")
+            print(f"   {post['text'][:150]}{'...' if len(post['text']) > 150 else ''}")
+            print()
+        print("="*60)
+    else:
+        print("\n📭 Kein Thread-Context (direkte Mention ohne Vorgänger)")
     
     # 2. Sammle alle URLs aus der Mention UND aus dem gesamten Thread
     all_text = mention['text']
@@ -400,12 +435,22 @@ def process_mention(client, mention):
     url_contents = {}
     
     if urls:
-        print(f"\n🔗 {len(urls)} URL(s) im Thread gefunden")
+        print(f"\n🔗 {len(urls)} URL(s) im Thread gefunden:")
         # Lade max. 3 URLs um Kosten/Zeit zu sparen
-        for url in urls[:3]:
+        for idx, url in enumerate(urls[:3], 1):
+            print(f"\n  [{idx}] {url}")
             content = fetch_url_content(url)
             if content:
                 url_contents[url] = content
+                # LOGGING: Zeige Anfang des extrahierten Inhalts
+                print(f"  ✅ Inhalt: {content[:200]}...")
+            else:
+                print(f"  ❌ Konnte nicht geladen werden")
+        
+        if len(urls) > 3:
+            print(f"\n  ℹ️ {len(urls) - 3} weitere URL(s) ignoriert (Limit: 3)")
+    else:
+        print("\n📭 Keine URLs im Thread gefunden")
     
     # 3. Generiere Antwort mit Claude (mit vollem Kontext)
     print("\n🤖 Frage Claude Sonnet nach Antwort (mit Kontext)...")
@@ -419,8 +464,8 @@ def process_mention(client, mention):
         print("❌ Keine Antwort generiert - überspringe")
         return False
     
-    # 4. Poste Antwort auf Bluesky
-    success = reply_to_mention(client, mention, response)
+    # 4. Poste Antwort auf Bluesky (oder simuliere im Dry-Run)
+    success = reply_to_mention(client, mention, response, dry_run=dry_run)
     
     if success:
         print(f"\n✅ Mention erfolgreich verarbeitet!")
@@ -428,25 +473,38 @@ def process_mention(client, mention):
     return success
 
 
-def process_all_mentions(client):
-    """Verarbeitet alle neuen Mentions"""
+def process_all_mentions(client, dry_run=False):
+    """
+    Verarbeitet alle neuen Mentions
+    
+    Args:
+        dry_run: Wenn True, werden keine Antworten wirklich gepostet
+    """
     print("\n" + "="*60)
     print("🔍 SUCHE NACH NEUEN MENTIONS")
+    if dry_run:
+        print("🧪 DRY RUN MODUS AKTIV - Keine Posts werden veröffentlicht!")
     print("="*60)
     
+    # Hole Mentions
     mentions = get_recent_mentions(client)
     
     if not mentions:
         print("📭 Keine neuen Mentions gefunden")
         return 0
     
+    # Verarbeite jede Mention
     successful = 0
     for i, mention in enumerate(mentions, 1):
         print(f"\n[{i}/{len(mentions)}]")
-        if process_mention(client, mention):
+        if process_mention(client, mention, dry_run=dry_run):
             successful += 1
     
-    mark_notification_as_read(client)
+    # Markiere als gelesen (auch im Dry-Run, um nicht immer dieselben zu sehen)
+    if not dry_run:
+        mark_notification_as_read(client)
+    else:
+        print("\n🧪 DRY RUN: Notifications werden NICHT als gelesen markiert")
     
     print(f"\n{'='*60}")
     print(f"✅ {successful}/{len(mentions)} Mentions erfolgreich verarbeitet")
@@ -455,7 +513,7 @@ def process_all_mentions(client):
     return successful
 
 
-def run_bot_continuously(client, check_interval=60):
+def run_bot_continuously(client, check_interval=60, dry_run=False):
     """
     Lässt den Bot dauerhaft laufen und prüft regelmäßig auf Mentions
     
@@ -464,10 +522,16 @@ def run_bot_continuously(client, check_interval=60):
     - Verarbeitet alle gefundenen Mentions
     - Behandelt Fehler gracefully und startet neu
     - Kann mit Ctrl+C gestoppt werden
+    
+    Args:
+        check_interval: Sekunden zwischen Checks
+        dry_run: Wenn True, werden keine Antworten wirklich gepostet
     """
     print("\n" + "="*60)
     print(f"🤖 BOT LÄUFT DAUERHAFT")
     print(f"⏰ Prüft alle {check_interval} Sekunden auf neue Mentions")
+    if dry_run:
+        print("🧪 DRY RUN MODUS - Keine Posts werden veröffentlicht!")
     print("="*60)
     print("💡 Drücke Ctrl+C um zu stoppen\n")
     
@@ -481,7 +545,7 @@ def run_bot_continuously(client, check_interval=60):
             print(f"\n⏰ [{timestamp}] Check #{iteration}")
             
             # Verarbeite alle neuen Mentions
-            count = process_all_mentions(client)
+            count = process_all_mentions(client, dry_run=dry_run)
             
             if count > 0:
                 print(f"✅ {count} Mention(s) bearbeitet")
@@ -499,7 +563,7 @@ def run_bot_continuously(client, check_interval=60):
         print("⏳ Warte 60 Sekunden und versuche es erneut...")
         time.sleep(60)
         # Rekursiver Aufruf um Bot am Laufen zu halten
-        run_bot_continuously(client, check_interval)
+        run_bot_continuously(client, check_interval, dry_run=dry_run)
 
 
 def main():
@@ -523,13 +587,30 @@ def main():
     
     print("✅ Alle Verbindungen erfolgreich!\n")
     
+    # Prüfe ob Dry-Run-Modus aktiviert ist
+    dry_run = (
+        "--dry-run" in sys.argv or 
+        os.getenv('DRY_RUN', 'false').lower() == 'true'
+    )
+    
+    if dry_run:
+        print("="*60)
+        print("🧪 DRY RUN MODUS AKTIVIERT")
+        print("   Keine Antworten werden auf Bluesky gepostet!")
+        print("   Zum Deaktivieren: Entferne --dry-run oder setze DRY_RUN=false")
+        print("="*60)
+        print()
+    
+    # Entscheide: Einmal oder Dauerbetrieb?
     if "--continuous" in sys.argv or os.getenv('BOT_MODE') == 'continuous':
         check_interval = int(os.getenv('CHECK_INTERVAL', '60'))
-        run_bot_continuously(client, check_interval=check_interval)
+        run_bot_continuously(client, check_interval=check_interval, dry_run=dry_run)
     else:
         print("📋 TEST-MODUS (einmalig)")
+        if not dry_run:
+            print("💡 Für Dry-Run: python main.py --dry-run")
         print("💡 Für Dauerbetrieb: python main.py --continuous\n")
-        process_all_mentions(client)
+        process_all_mentions(client, dry_run=dry_run)
         print("\n✅ Test abgeschlossen!")
 
 
