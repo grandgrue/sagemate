@@ -396,13 +396,9 @@ def get_direct_messages(client):
     WICHTIG: 
     - App-Passwort muss DM-Berechtigung haben!
     - Nutzt Chat-Proxy für DM-API-Zugriff
-    - Cache verhindert doppelte Verarbeitung
+    - Verarbeitete Nachrichten werden gelöscht (kein Cache nötig!)
     """
     print("💌 Prüfe auf neue Direktnachrichten...")
-    
-    # Initialisiere Cache für verarbeitete Nachrichten (falls noch nicht vorhanden)
-    if not hasattr(client, '_processed_dm_ids'):
-        client._processed_dm_ids = set()
     
     try:
         # Erstelle Chat-Proxy-Client für DM-API-Zugriff
@@ -428,10 +424,6 @@ def get_direct_messages(client):
                 for msg in messages.messages:
                     # Überspringe Bot's eigene Nachrichten
                     if msg.sender.did == client.me.did:
-                        continue
-                    
-                    # Überspringe bereits verarbeitete Nachrichten
-                    if msg.id in client._processed_dm_ids:
                         continue
                     
                     # Prüfe ob es eine "Per Direktnachricht senden" Nachricht ist
@@ -587,11 +579,10 @@ def process_dm(client, dm, dry_run=False):
     4. Lade Webseiten-Inhalte
     5. Generiere Antwort mit Claude (basierend auf referenziertem Post)
     6. Poste Antwort ÖFFENTLICH auf Bluesky (als Reply auf den Post)
-    7. Markiere DM als gelesen
-    8. Speichere Message-ID im Cache
+    7. Lösche DM (kein Cache nötig!)
     
     Args:
-        dry_run: Wenn True, wird nichts wirklich gepostet
+        dry_run: Wenn True, wird nichts wirklich gepostet oder gelöscht
     """
     print(f"\n{'='*60}")
     print(f"💌 Neue DM von @{dm['sender']}")
@@ -605,10 +596,9 @@ def process_dm(client, dm, dry_run=False):
     
     if not referenced_post:
         print("⚠️ Kein Post in DM referenziert - überspringe")
-        # Markiere trotzdem als verarbeitet um nicht erneut zu verarbeiten
+        # Lösche trotzdem um nicht erneut zu verarbeiten
         if not dry_run:
-            mark_dm_as_read(client, dm['convo_id'])
-            client._processed_dm_ids.add(dm['message_id'])
+            delete_dm_message(client, dm['convo_id'], dm['message_id'])
         return False
     
     print(f"✅ Referenzierter Post von @{referenced_post['author']}:")
@@ -683,24 +673,21 @@ def process_dm(client, dm, dry_run=False):
     
     if not response:
         print("❌ Keine Antwort generiert - überspringe")
-        # Markiere trotzdem als verarbeitet
+        # Lösche trotzdem um nicht erneut zu verarbeiten
         if not dry_run:
-            mark_dm_as_read(client, dm['convo_id'])
-            client._processed_dm_ids.add(dm['message_id'])
+            delete_dm_message(client, dm['convo_id'], dm['message_id'])
         return False
     
     # 5. Poste Antwort ÖFFENTLICH auf Bluesky (als Reply auf den Post)
     print("\n🌐 Poste öffentliche Antwort auf Bluesky...")
     success = reply_to_mention(client, referenced_post, response, dry_run=dry_run)
     
-    # 6. Markiere DM als gelesen (WICHTIG!)
-    # 7. Speichere Message-ID im Cache (WICHTIG!)
+    # 6. Lösche DM (WICHTIG - verhindert Duplikate!)
     if not dry_run:
-        mark_dm_as_read(client, dm['convo_id'])
-        client._processed_dm_ids.add(dm['message_id'])
-        print(f"✅ Message-ID {dm['message_id']} zum Cache hinzugefügt")
+        delete_dm_message(client, dm['convo_id'], dm['message_id'])
+        print(f"✅ DM gelöscht - keine Duplikate mehr möglich!")
     else:
-        print("🧪 DRY RUN: DM wird NICHT als gelesen markiert und NICHT gecacht")
+        print("🧪 DRY RUN: DM wird NICHT gelöscht")
     
     if success:
         print(f"\n✅ Post erfolgreich öffentlich beantwortet!")
@@ -811,28 +798,30 @@ def reply_to_mention(client, mention, reply_text, dry_run=False):
         return False
 
 
-def mark_dm_as_read(client, convo_id):
+def delete_dm_message(client, convo_id, message_id):
     """
-    Markiert alle Nachrichten in einer Konversation als gelesen
+    Löscht eine DM-Nachricht
     
     Args:
         client: Bluesky Client
         convo_id: Konversations-ID
+        message_id: ID der zu löschenden Nachricht
     """
     try:
         # Erstelle Chat-Proxy-Client
         dm_client = client.with_bsky_chat_proxy()
         
-        # Markiere Konversation als gelesen
-        dm_client.chat.bsky.convo.update_read({
-            'convo_id': convo_id
+        # Lösche Nachricht
+        dm_client.chat.bsky.convo.delete_message_for_self({
+            'convo_id': convo_id,
+            'message_id': message_id
         })
         
-        print("✅ DM-Konversation als gelesen markiert")
+        print(f"🗑️  Nachricht {message_id} gelöscht")
         return True
         
     except Exception as e:
-        print(f"⚠️ Konnte DM nicht als gelesen markieren: {e}")
+        print(f"⚠️ Konnte Nachricht nicht löschen: {e}")
         return False
 
 
