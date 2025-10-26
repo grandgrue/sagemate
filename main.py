@@ -393,19 +393,22 @@ def get_direct_messages(client):
     NEU: Diese Funktion sucht nach Direktnachrichten die mit "Per Direktnachricht senden"
     gesendet wurden und auf einen Post verweisen
     
-    WICHTIG: DM-API ist möglicherweise nicht auf allen Bluesky-Servern verfügbar!
+    WICHTIG: 
+    - App-Passwort muss DM-Berechtigung haben!
+    - Nutzt Chat-Proxy für DM-API-Zugriff
     """
     print("💌 Prüfe auf neue Direktnachrichten...")
     
     try:
-        # Prüfe ob Chat-API verfügbar ist
-        if not hasattr(client, 'chat'):
-            print("ℹ️  Chat-API nicht verfügbar auf diesem Server")
-            print("   DM-Support wird übersprungen")
-            return []
+        # Erstelle Chat-Proxy-Client für DM-API-Zugriff
+        # Dies ist notwendig weil DM-API über einen separaten Service läuft
+        dm_client = client.with_bsky_chat_proxy()
+        
+        # Shortcut zu Convo-Methoden
+        dm = dm_client.chat.bsky.convo
         
         # Hole Chat-Liste
-        convos = client.chat.bsky.convo.list_convos()
+        convos = dm.list_convos()
         
         dms = []
         
@@ -413,12 +416,12 @@ def get_direct_messages(client):
             # Prüfe ob es ungelesene Nachrichten gibt
             if convo.unread_count > 0:
                 # Hole Nachrichten dieser Konversation
-                messages = client.chat.bsky.convo.get_messages({
+                messages = dm.get_messages({
                     'convo_id': convo.id
                 })
                 
                 for msg in messages.messages:
-                    # Prüfe ob Nachricht von anderem Nutzer und noch nicht gelesen
+                    # Prüfe ob Nachricht von anderem Nutzer
                     if msg.sender.did != client.me.did:
                         # Prüfe ob es eine "Per Direktnachricht senden" Nachricht ist
                         # Diese haben normalerweise ein embed mit dem referenzierten Post
@@ -440,19 +443,30 @@ def get_direct_messages(client):
         return dms
         
     except AttributeError as e:
-        # Chat-API nicht verfügbar
-        print(f"ℹ️  Chat-API nicht verfügbar: {e}")
+        # with_bsky_chat_proxy() existiert nicht
+        error_str = str(e)
+        if 'with_bsky_chat_proxy' in error_str:
+            print(f"⚠️  Deine atproto-Version unterstützt Chat-Proxy nicht")
+            print(f"   Bitte aktualisiere: pip install --upgrade atproto")
+        else:
+            print(f"ℹ️  Chat-API nicht verfügbar: {e}")
         print("   DM-Support wird übersprungen (nur Mentions werden verarbeitet)")
+        client._dm_not_available = True
         return []
     except Exception as e:
         # Prüfe auf spezifische API-Fehler
         error_str = str(e)
         if 'XRPCNotSupported' in error_str or '404' in error_str:
-            print(f"ℹ️  Chat/DM-API wird von diesem Bluesky-Server nicht unterstützt")
+            print(f"ℹ️  Chat/DM-API nicht unterstützt oder App-Passwort hat keine DM-Berechtigung")
+            print(f"   LÖSUNG: Erstelle neues App-Passwort mit DM-Zugriff in Bluesky-Einstellungen")
             print("   Der Bot arbeitet weiter im Mention-Modus")
-            # Setze Flag dass DMs nicht verfügbar sind (für zukünftige Checks)
-            if not hasattr(client, '_dm_not_available'):
-                client._dm_not_available = True
+            client._dm_not_available = True
+        elif 'Bad token scope' in error_str or 'AuthScopeMismatch' in error_str:
+            print(f"⚠️  App-Passwort hat keine DM-Berechtigung!")
+            print(f"   LÖSUNG: Erstelle neues App-Passwort mit aktiviertem DM-Zugriff")
+            print(f"   Gehe zu: Einstellungen → App-Passwörter → Neues erstellen")
+            print(f"   ✓ Aktiviere 'Direct Messages' beim Erstellen")
+            client._dm_not_available = True
         else:
             print(f"⚠️  Unerwarteter Fehler beim Abrufen von DMs: {e}")
             print(f"   Fehlertyp: {type(e).__name__}")
@@ -527,12 +541,19 @@ def send_dm_reply(client, convo_id, reply_text, dry_run=False):
     
     # Wirklich senden
     try:
-        client.chat.bsky.convo.send_message({
-            'convo_id': convo_id,
-            'message': {
-                'text': safe_text
-            }
-        })
+        # Erstelle Chat-Proxy-Client
+        dm_client = client.with_bsky_chat_proxy()
+        
+        # Sende Nachricht
+        from atproto import models
+        dm_client.chat.bsky.convo.send_message(
+            models.ChatBskyConvoSendMessage.Data(
+                convo_id=convo_id,
+                message=models.ChatBskyConvoDefs.MessageInput(
+                    text=safe_text
+                )
+            )
+        )
         
         print("✅ DM erfolgreich gesendet!")
         return True
