@@ -392,15 +392,19 @@ def get_direct_messages(client):
     
     NEU: Diese Funktion sucht nach Direktnachrichten die mit "Per Direktnachricht senden"
     gesendet wurden und auf einen Post verweisen
+    
+    WICHTIG: DM-API ist möglicherweise nicht auf allen Bluesky-Servern verfügbar!
     """
     print("💌 Prüfe auf neue Direktnachrichten...")
     
     try:
-        # Hole Chat-Liste
-        # Hinweis: Die genaue API für DMs kann je nach atproto-Version variieren
-        # Hier verwenden wir die Standard-API-Struktur
+        # Prüfe ob Chat-API verfügbar ist
+        if not hasattr(client, 'chat'):
+            print("ℹ️  Chat-API nicht verfügbar auf diesem Server")
+            print("   DM-Support wird übersprungen")
+            return []
         
-        # Liste aller Konversationen
+        # Hole Chat-Liste
         convos = client.chat.bsky.convo.list_convos()
         
         dms = []
@@ -435,9 +439,23 @@ def get_direct_messages(client):
         
         return dms
         
+    except AttributeError as e:
+        # Chat-API nicht verfügbar
+        print(f"ℹ️  Chat-API nicht verfügbar: {e}")
+        print("   DM-Support wird übersprungen (nur Mentions werden verarbeitet)")
+        return []
     except Exception as e:
-        print(f"❌ Fehler beim Abrufen von DMs: {e}")
-        print(f"   Details: {type(e).__name__}")
+        # Prüfe auf spezifische API-Fehler
+        error_str = str(e)
+        if 'XRPCNotSupported' in error_str or '404' in error_str:
+            print(f"ℹ️  Chat/DM-API wird von diesem Bluesky-Server nicht unterstützt")
+            print("   Der Bot arbeitet weiter im Mention-Modus")
+            # Setze Flag dass DMs nicht verfügbar sind (für zukünftige Checks)
+            if not hasattr(client, '_dm_not_available'):
+                client._dm_not_available = True
+        else:
+            print(f"⚠️  Unerwarteter Fehler beim Abrufen von DMs: {e}")
+            print(f"   Fehlertyp: {type(e).__name__}")
         return []
 
 
@@ -914,6 +932,11 @@ def process_all_dms(client, dry_run=False):
     Args:
         dry_run: Wenn True, werden keine Antworten wirklich gesendet
     """
+    # Prüfe ob DMs bereits als nicht verfügbar markiert wurden
+    if hasattr(client, '_dm_not_available') and client._dm_not_available:
+        # Stille Rückkehr - keine Log-Nachricht bei jedem Check
+        return 0
+    
     print("\n" + "="*60)
     print("🔍 SUCHE NACH NEUEN DIREKTNACHRICHTEN")
     if dry_run:
@@ -946,7 +969,7 @@ def run_bot_continuously(client, check_interval=60, dry_run=False):
     Lässt den Bot dauerhaft laufen und prüft regelmäßig auf Mentions und DMs
     
     Der Bot läuft in einer Endlosschleife und:
-    - Prüft alle X Sekunden auf neue Mentions und DMs
+    - Prüft alle X Sekunden auf neue Mentions und DMs (falls verfügbar)
     - Verarbeitet alle gefundenen Nachrichten
     - Behandelt Fehler gracefully und startet neu
     - Kann mit Ctrl+C gestoppt werden
@@ -956,12 +979,22 @@ def run_bot_continuously(client, check_interval=60, dry_run=False):
         dry_run: Wenn True, werden keine Antworten wirklich gepostet/gesendet
     """
     print("\n" + "="*60)
-    print(f"🤖 BOT LÄUFT DAUERHAFT (MIT DM-SUPPORT)")
+    print(f"🤖 BOT LÄUFT DAUERHAFT")
     print(f"⏰ Prüft alle {check_interval} Sekunden auf neue Nachrichten")
     if dry_run:
         print("🧪 DRY RUN MODUS - Keine Nachrichten werden veröffentlicht!")
     print("="*60)
     print("💡 Drücke Ctrl+C um zu stoppen\n")
+    
+    # Prüfe einmalig ob DMs verfügbar sind
+    print("ℹ️  Teste DM-Verfügbarkeit...")
+    test_dms = get_direct_messages(client)
+    dm_available = not (hasattr(client, '_dm_not_available') and client._dm_not_available)
+    
+    if dm_available:
+        print("✅ DM-Support aktiv - Bot verarbeitet Mentions UND DMs\n")
+    else:
+        print("ℹ️  DM-Support nicht verfügbar - Bot verarbeitet nur Mentions\n")
     
     iteration = 0
     
@@ -975,11 +1008,16 @@ def run_bot_continuously(client, check_interval=60, dry_run=False):
             # Verarbeite Mentions
             mention_count = process_all_mentions(client, dry_run=dry_run)
             
-            # Verarbeite DMs
-            dm_count = process_all_dms(client, dry_run=dry_run)
+            # Verarbeite DMs (nur wenn verfügbar)
+            dm_count = 0
+            if dm_available:
+                dm_count = process_all_dms(client, dry_run=dry_run)
             
             if mention_count > 0 or dm_count > 0:
-                print(f"✅ {mention_count} Mention(s) + {dm_count} DM(s) bearbeitet")
+                if dm_available:
+                    print(f"✅ {mention_count} Mention(s) + {dm_count} DM(s) bearbeitet")
+                else:
+                    print(f"✅ {mention_count} Mention(s) bearbeitet")
             
             # Warte bis zum nächsten Check
             print(f"😴 Schlafe {check_interval} Sekunden...")
@@ -1001,7 +1039,7 @@ def main():
     """Hauptfunktion"""
     import sys
     
-    print("=== Sagemate Bot (Extended + DM Support) ===\n")
+    print("=== Sagemate Bot (Extended) ===\n")
     
     if not debug_env_vars():
         print("⚠️ Bitte .env Datei prüfen!")
@@ -1042,11 +1080,20 @@ def main():
             print("💡 Für Dry-Run: python main.py --dry-run")
         print("💡 Für Dauerbetrieb: python main.py --continuous\n")
         
-        # Verarbeite sowohl Mentions als auch DMs
+        # Verarbeite Mentions
         mention_count = process_all_mentions(client, dry_run=dry_run)
+        
+        # Teste DM-Verfügbarkeit und verarbeite falls verfügbar
+        print("\nℹ️  Teste DM-Verfügbarkeit...")
         dm_count = process_all_dms(client, dry_run=dry_run)
         
-        print(f"\n✅ Test abgeschlossen! ({mention_count} Mentions + {dm_count} DMs)")
+        dm_available = not (hasattr(client, '_dm_not_available') and client._dm_not_available)
+        
+        if dm_available:
+            print(f"\n✅ Test abgeschlossen! ({mention_count} Mentions + {dm_count} DMs)")
+        else:
+            print(f"\n✅ Test abgeschlossen! ({mention_count} Mentions)")
+            print("ℹ️  DM-Support nicht verfügbar - Bot arbeitet im Mention-Modus")
 
 
 if __name__ == "__main__":
