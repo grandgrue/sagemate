@@ -396,6 +396,7 @@ def get_direct_messages(client):
     WICHTIG: 
     - App-Passwort muss DM-Berechtigung haben!
     - Nutzt Chat-Proxy für DM-API-Zugriff
+    - Filtert bereits verarbeitete Nachrichten
     """
     print("💌 Prüfe auf neue Direktnachrichten...")
     
@@ -574,6 +575,7 @@ def process_dm(client, dm, dry_run=False):
     4. Lade Webseiten-Inhalte
     5. Generiere Antwort mit Claude (basierend auf referenziertem Post)
     6. Sende Antwort per DM zurück
+    7. Markiere DM als gelesen
     
     Args:
         dry_run: Wenn True, wird nichts wirklich gesendet
@@ -589,6 +591,9 @@ def process_dm(client, dm, dry_run=False):
     
     if not referenced_post:
         print("⚠️ Kein Post in DM referenziert - überspringe")
+        # Markiere trotzdem als gelesen um nicht erneut zu verarbeiten
+        if not dry_run:
+            mark_dm_as_read(client, dm['convo_id'])
         return False
     
     print(f"✅ Referenzierter Post von @{referenced_post['author']}:")
@@ -662,10 +667,19 @@ def process_dm(client, dm, dry_run=False):
     
     if not response:
         print("❌ Keine Antwort generiert - überspringe")
+        # Markiere trotzdem als gelesen
+        if not dry_run:
+            mark_dm_as_read(client, dm['convo_id'])
         return False
     
     # 5. Sende Antwort per DM zurück
     success = send_dm_reply(client, dm['convo_id'], response, dry_run=dry_run)
+    
+    # 6. Markiere DM als gelesen (WICHTIG!)
+    if not dry_run:
+        mark_dm_as_read(client, dm['convo_id'])
+    else:
+        print("🧪 DRY RUN: DM wird NICHT als gelesen markiert")
     
     if success:
         print(f"\n✅ DM erfolgreich verarbeitet!")
@@ -771,6 +785,31 @@ def reply_to_mention(client, mention, reply_text, dry_run=False):
         
     except Exception as e:
         print(f"❌ Fehler beim Posten: {e}")
+        return False
+
+
+def mark_dm_as_read(client, convo_id):
+    """
+    Markiert alle Nachrichten in einer Konversation als gelesen
+    
+    Args:
+        client: Bluesky Client
+        convo_id: Konversations-ID
+    """
+    try:
+        # Erstelle Chat-Proxy-Client
+        dm_client = client.with_bsky_chat_proxy()
+        
+        # Markiere Konversation als gelesen
+        dm_client.chat.bsky.convo.update_read({
+            'convo_id': convo_id
+        })
+        
+        print("✅ DM-Konversation als gelesen markiert")
+        return True
+        
+    except Exception as e:
+        print(f"⚠️ Konnte DM nicht als gelesen markieren: {e}")
         return False
 
 
