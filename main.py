@@ -386,6 +386,254 @@ def get_recent_mentions(client):
         return []
 
 
+def get_direct_messages(client):
+    """
+    Holt alle ungelesenen Direktnachrichten
+    
+    NEU: Diese Funktion sucht nach Direktnachrichten die mit "Per Direktnachricht senden"
+    gesendet wurden und auf einen Post verweisen
+    """
+    print("💌 Prüfe auf neue Direktnachrichten...")
+    
+    try:
+        # Hole Chat-Liste
+        # Hinweis: Die genaue API für DMs kann je nach atproto-Version variieren
+        # Hier verwenden wir die Standard-API-Struktur
+        
+        # Liste aller Konversationen
+        convos = client.chat.bsky.convo.list_convos()
+        
+        dms = []
+        
+        for convo in convos.convos:
+            # Prüfe ob es ungelesene Nachrichten gibt
+            if convo.unread_count > 0:
+                # Hole Nachrichten dieser Konversation
+                messages = client.chat.bsky.convo.get_messages({
+                    'convo_id': convo.id
+                })
+                
+                for msg in messages.messages:
+                    # Prüfe ob Nachricht von anderem Nutzer und noch nicht gelesen
+                    if msg.sender.did != client.me.did:
+                        # Prüfe ob es eine "Per Direktnachricht senden" Nachricht ist
+                        # Diese haben normalerweise ein embed mit dem referenzierten Post
+                        if hasattr(msg, 'embed') and msg.embed:
+                            dms.append({
+                                'convo_id': convo.id,
+                                'message_id': msg.id,
+                                'sender': msg.sender.handle if hasattr(msg.sender, 'handle') else 'unknown',
+                                'text': msg.text if hasattr(msg, 'text') else "",
+                                'embed': msg.embed,
+                                'sent_at': msg.sent_at
+                            })
+        
+        if dms:
+            print(f"✅ {len(dms)} neue DM(s) mit Post-Referenz gefunden!")
+        else:
+            print("📭 Keine neuen DMs mit Post-Referenz")
+        
+        return dms
+        
+    except Exception as e:
+        print(f"❌ Fehler beim Abrufen von DMs: {e}")
+        print(f"   Details: {type(e).__name__}")
+        return []
+
+
+def get_post_from_dm_embed(client, dm):
+    """
+    Extrahiert den referenzierten Post aus einer DM
+    
+    Args:
+        dm: DM-Objekt mit embed
+    
+    Returns:
+        Post-Objekt oder None
+    """
+    try:
+        embed = dm['embed']
+        
+        # Prüfe ob es ein Record-Embed ist (Post-Referenz)
+        if hasattr(embed, 'record'):
+            record = embed.record
+            
+            # Hole URI des referenzierten Posts
+            if hasattr(record, 'uri'):
+                post_uri = record.uri
+                print(f"🔗 Post-Referenz in DM gefunden: {post_uri}")
+                
+                # Hole den vollständigen Post
+                thread = client.get_post_thread(uri=post_uri)
+                
+                if hasattr(thread, 'thread') and hasattr(thread.thread, 'post'):
+                    post = thread.thread.post
+                    return {
+                        'author': post.author.handle if hasattr(post.author, 'handle') else 'unknown',
+                        'text': post.record.text if hasattr(post.record, 'text') else '',
+                        'uri': post_uri,
+                        'cid': post.cid if hasattr(post, 'cid') else None,
+                        'record': post.record
+                    }
+        
+        return None
+        
+    except Exception as e:
+        print(f"⚠️ Fehler beim Extrahieren des Posts aus DM: {e}")
+        return None
+
+
+def send_dm_reply(client, convo_id, reply_text, dry_run=False):
+    """
+    Sendet eine Antwort per Direktnachricht
+    
+    Args:
+        client: Bluesky Client
+        convo_id: Konversations-ID
+        reply_text: Text der Antwort
+        dry_run: Wenn True, wird nicht wirklich gesendet
+    """
+    # Sicherheit: Kürze auf Bluesky-Limit (DMs haben oft höheres Limit, aber bleiben wir sicher)
+    safe_text = truncate_for_bluesky(reply_text, max_length=1000)
+    
+    print(f"\n{'='*60}")
+    print(f"💌 DM-ANTWORT ({len(safe_text)} Zeichen):")
+    print(f"{'='*60}")
+    print(safe_text)
+    print(f"{'='*60}\n")
+    
+    # DRY RUN MODE
+    if dry_run:
+        print("🧪 DRY RUN MODUS: DM wird NICHT gesendet!")
+        return True
+    
+    # Wirklich senden
+    try:
+        client.chat.bsky.convo.send_message({
+            'convo_id': convo_id,
+            'message': {
+                'text': safe_text
+            }
+        })
+        
+        print("✅ DM erfolgreich gesendet!")
+        return True
+        
+    except Exception as e:
+        print(f"❌ Fehler beim Senden der DM: {e}")
+        return False
+
+
+def process_dm(client, dm, dry_run=False):
+    """
+    Verarbeitet eine einzelne Direktnachricht
+    
+    Workflow:
+    1. Extrahiere referenzierten Post aus DM
+    2. Lade Thread-Context des Posts
+    3. Extrahiere URLs aus Post und Thread
+    4. Lade Webseiten-Inhalte
+    5. Generiere Antwort mit Claude (basierend auf referenziertem Post)
+    6. Sende Antwort per DM zurück
+    
+    Args:
+        dry_run: Wenn True, wird nichts wirklich gesendet
+    """
+    print(f"\n{'='*60}")
+    print(f"💌 Neue DM von @{dm['sender']}")
+    if dm['text']:
+        print(f"📝 Nachricht: {dm['text']}")
+    print(f"{'='*60}")
+    
+    # 1. Hole referenzierten Post aus DM
+    referenced_post = get_post_from_dm_embed(client, dm)
+    
+    if not referenced_post:
+        print("⚠️ Kein Post in DM referenziert - überspringe")
+        return False
+    
+    print(f"✅ Referenzierter Post von @{referenced_post['author']}:")
+    print(f"   {referenced_post['text'][:150]}...")
+    
+    # 2. Hole Thread-Context des referenzierten Posts
+    thread_context = get_thread_context(client, referenced_post['uri'])
+    
+    # LOGGING: Thread-Context anzeigen
+    if thread_context and len(thread_context) > 0:
+        print(f"\n📜 THREAD-CONTEXT ({len(thread_context)} Posts):")
+        print("="*60)
+        for i, post in enumerate(thread_context, 1):
+            print(f"{i}. @{post['author']}:")
+            print(f"   {post['text'][:150]}{'...' if len(post['text']) > 150 else ''}")
+            print()
+        print("="*60)
+    
+    # 3. Sammle URLs aus dem Post und Thread
+    all_urls = []
+    
+    # URLs aus dem referenzierten Post
+    if 'record' in referenced_post and referenced_post['record']:
+        post_urls = extract_urls_from_post(referenced_post['record'])
+        all_urls.extend(post_urls)
+        print(f"\n🔍 {len(post_urls)} URL(s) im referenzierten Post gefunden")
+    
+    # URLs aus Thread
+    if thread_context:
+        for post in thread_context:
+            if 'record' in post and post['record']:
+                post_urls = extract_urls_from_post(post['record'])
+                all_urls.extend(post_urls)
+        print(f"🔍 Insgesamt {len(all_urls)} URL(s) in Thread")
+    
+    # Duplikate entfernen
+    urls = list(set(all_urls))
+    url_contents = {}
+    
+    if urls:
+        print(f"\n🔗 {len(urls)} eindeutige URL(s) gefunden:")
+        # Lade max. 3 URLs
+        for idx, url in enumerate(urls[:3], 1):
+            print(f"\n  [{idx}] {url}")
+            content = fetch_url_content(url)
+            if content:
+                url_contents[url] = content
+                print(f"  ✅ Inhalt: {content[:200]}...")
+            else:
+                print(f"  ❌ Konnte nicht geladen werden")
+        
+        if len(urls) > 3:
+            print(f"\n  ℹ️ {len(urls) - 3} weitere URL(s) ignoriert (Limit: 3)")
+    
+    # 4. Generiere Antwort mit Claude
+    # Nutze den Text des referenzierten Posts als Basis
+    print("\n🤖 Frage Claude nach Antwort zum referenzierten Post...")
+    
+    # Erstelle Kontext-Text für Claude
+    context_text = f"Frage/Post von @{referenced_post['author']}:\n{referenced_post['text']}"
+    
+    # Optional: Füge DM-Text hinzu wenn vorhanden
+    if dm['text']:
+        context_text += f"\n\nZusätzliche Notiz vom Nutzer:\n{dm['text']}"
+    
+    response = generate_response_with_claude(
+        context_text,
+        thread_context=thread_context,
+        url_contents=url_contents if url_contents else None
+    )
+    
+    if not response:
+        print("❌ Keine Antwort generiert - überspringe")
+        return False
+    
+    # 5. Sende Antwort per DM zurück
+    success = send_dm_reply(client, dm['convo_id'], response, dry_run=dry_run)
+    
+    if success:
+        print(f"\n✅ DM erfolgreich verarbeitet!")
+    
+    return success
+
+
 def is_mention_empty(mention_text, bot_handle):
     """
     Prüft ob eine Mention "leer" ist (nur Bot-Mention, kein substantieller Text)
@@ -530,6 +778,8 @@ def process_mention(client, mention, dry_run=False):
         if parent_post:
             print(f"✅ Bot wird auf Original-Post antworten:")
             print(f"   @{parent_post['author']}: {parent_post['text'][:100]}...")
+            
+            # WICHTIG: Ändere reply_target auf parent_post
             reply_target = parent_post
             
             # Nutze Text des Original-Posts als "Mention-Text" für Kontext
@@ -657,25 +907,59 @@ def process_all_mentions(client, dry_run=False):
     return successful
 
 
+def process_all_dms(client, dry_run=False):
+    """
+    Verarbeitet alle neuen Direktnachrichten mit Post-Referenzen
+    
+    Args:
+        dry_run: Wenn True, werden keine Antworten wirklich gesendet
+    """
+    print("\n" + "="*60)
+    print("🔍 SUCHE NACH NEUEN DIREKTNACHRICHTEN")
+    if dry_run:
+        print("🧪 DRY RUN MODUS AKTIV - Keine DMs werden gesendet!")
+    print("="*60)
+    
+    # Hole DMs
+    dms = get_direct_messages(client)
+    
+    if not dms:
+        print("📭 Keine neuen DMs mit Post-Referenz gefunden")
+        return 0
+    
+    # Verarbeite jede DM
+    successful = 0
+    for i, dm in enumerate(dms, 1):
+        print(f"\n[{i}/{len(dms)}]")
+        if process_dm(client, dm, dry_run=dry_run):
+            successful += 1
+    
+    print(f"\n{'='*60}")
+    print(f"✅ {successful}/{len(dms)} DMs erfolgreich verarbeitet")
+    print(f"{'='*60}\n")
+    
+    return successful
+
+
 def run_bot_continuously(client, check_interval=60, dry_run=False):
     """
-    Lässt den Bot dauerhaft laufen und prüft regelmäßig auf Mentions
+    Lässt den Bot dauerhaft laufen und prüft regelmäßig auf Mentions und DMs
     
     Der Bot läuft in einer Endlosschleife und:
-    - Prüft alle X Sekunden auf neue Mentions
-    - Verarbeitet alle gefundenen Mentions
+    - Prüft alle X Sekunden auf neue Mentions und DMs
+    - Verarbeitet alle gefundenen Nachrichten
     - Behandelt Fehler gracefully und startet neu
     - Kann mit Ctrl+C gestoppt werden
     
     Args:
         check_interval: Sekunden zwischen Checks
-        dry_run: Wenn True, werden keine Antworten wirklich gepostet
+        dry_run: Wenn True, werden keine Antworten wirklich gepostet/gesendet
     """
     print("\n" + "="*60)
-    print(f"🤖 BOT LÄUFT DAUERHAFT")
-    print(f"⏰ Prüft alle {check_interval} Sekunden auf neue Mentions")
+    print(f"🤖 BOT LÄUFT DAUERHAFT (MIT DM-SUPPORT)")
+    print(f"⏰ Prüft alle {check_interval} Sekunden auf neue Nachrichten")
     if dry_run:
-        print("🧪 DRY RUN MODUS - Keine Posts werden veröffentlicht!")
+        print("🧪 DRY RUN MODUS - Keine Nachrichten werden veröffentlicht!")
     print("="*60)
     print("💡 Drücke Ctrl+C um zu stoppen\n")
     
@@ -688,11 +972,14 @@ def run_bot_continuously(client, check_interval=60, dry_run=False):
             
             print(f"\n⏰ [{timestamp}] Check #{iteration}")
             
-            # Verarbeite alle neuen Mentions
-            count = process_all_mentions(client, dry_run=dry_run)
+            # Verarbeite Mentions
+            mention_count = process_all_mentions(client, dry_run=dry_run)
             
-            if count > 0:
-                print(f"✅ {count} Mention(s) bearbeitet")
+            # Verarbeite DMs
+            dm_count = process_all_dms(client, dry_run=dry_run)
+            
+            if mention_count > 0 or dm_count > 0:
+                print(f"✅ {mention_count} Mention(s) + {dm_count} DM(s) bearbeitet")
             
             # Warte bis zum nächsten Check
             print(f"😴 Schlafe {check_interval} Sekunden...")
@@ -714,7 +1001,7 @@ def main():
     """Hauptfunktion"""
     import sys
     
-    print("=== Sagemate Bot (Extended) ===\n")
+    print("=== Sagemate Bot (Extended + DM Support) ===\n")
     
     if not debug_env_vars():
         print("⚠️ Bitte .env Datei prüfen!")
@@ -740,7 +1027,7 @@ def main():
     if dry_run:
         print("="*60)
         print("🧪 DRY RUN MODUS AKTIVIERT")
-        print("   Keine Antworten werden auf Bluesky gepostet!")
+        print("   Keine Antworten werden auf Bluesky gepostet/gesendet!")
         print("   Zum Deaktivieren: Entferne --dry-run oder setze DRY_RUN=false")
         print("="*60)
         print()
@@ -754,8 +1041,12 @@ def main():
         if not dry_run:
             print("💡 Für Dry-Run: python main.py --dry-run")
         print("💡 Für Dauerbetrieb: python main.py --continuous\n")
-        process_all_mentions(client, dry_run=dry_run)
-        print("\n✅ Test abgeschlossen!")
+        
+        # Verarbeite sowohl Mentions als auch DMs
+        mention_count = process_all_mentions(client, dry_run=dry_run)
+        dm_count = process_all_dms(client, dry_run=dry_run)
+        
+        print(f"\n✅ Test abgeschlossen! ({mention_count} Mentions + {dm_count} DMs)")
 
 
 if __name__ == "__main__":
