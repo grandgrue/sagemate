@@ -568,17 +568,19 @@ def process_dm(client, dm, dry_run=False):
     """
     Verarbeitet eine einzelne Direktnachricht
     
+    WICHTIG: Bot antwortet ÖFFENTLICH auf den referenzierten Post, nicht per DM!
+    
     Workflow:
     1. Extrahiere referenzierten Post aus DM
     2. Lade Thread-Context des Posts
     3. Extrahiere URLs aus Post und Thread
     4. Lade Webseiten-Inhalte
     5. Generiere Antwort mit Claude (basierend auf referenziertem Post)
-    6. Sende Antwort per DM zurück
+    6. Poste Antwort ÖFFENTLICH auf Bluesky (als Reply auf den Post)
     7. Markiere DM als gelesen
     
     Args:
-        dry_run: Wenn True, wird nichts wirklich gesendet
+        dry_run: Wenn True, wird nichts wirklich gepostet
     """
     print(f"\n{'='*60}")
     print(f"💌 Neue DM von @{dm['sender']}")
@@ -598,6 +600,7 @@ def process_dm(client, dm, dry_run=False):
     
     print(f"✅ Referenzierter Post von @{referenced_post['author']}:")
     print(f"   {referenced_post['text'][:150]}...")
+    print(f"🎯 Bot wird ÖFFENTLICH auf diesen Post antworten!")
     
     # 2. Hole Thread-Context des referenzierten Posts
     thread_context = get_thread_context(client, referenced_post['uri'])
@@ -672,8 +675,9 @@ def process_dm(client, dm, dry_run=False):
             mark_dm_as_read(client, dm['convo_id'])
         return False
     
-    # 5. Sende Antwort per DM zurück
-    success = send_dm_reply(client, dm['convo_id'], response, dry_run=dry_run)
+    # 5. Poste Antwort ÖFFENTLICH auf Bluesky (als Reply auf den Post)
+    print("\n🌐 Poste öffentliche Antwort auf Bluesky...")
+    success = reply_to_mention(client, referenced_post, response, dry_run=dry_run)
     
     # 6. Markiere DM als gelesen (WICHTIG!)
     if not dry_run:
@@ -682,7 +686,9 @@ def process_dm(client, dm, dry_run=False):
         print("🧪 DRY RUN: DM wird NICHT als gelesen markiert")
     
     if success:
-        print(f"\n✅ DM erfolgreich verarbeitet!")
+        print(f"\n✅ Post erfolgreich öffentlich beantwortet!")
+        print(f"   Für @{dm['sender']}: Aktivierung per DM erfolgreich!")
+        print(f"   Für andere: Bot hat von sich aus geantwortet")
     
     return success
 
