@@ -396,9 +396,13 @@ def get_direct_messages(client):
     WICHTIG: 
     - App-Passwort muss DM-Berechtigung haben!
     - Nutzt Chat-Proxy für DM-API-Zugriff
-    - Filtert bereits verarbeitete Nachrichten
+    - Cache verhindert doppelte Verarbeitung
     """
     print("💌 Prüfe auf neue Direktnachrichten...")
+    
+    # Initialisiere Cache für verarbeitete Nachrichten (falls noch nicht vorhanden)
+    if not hasattr(client, '_processed_dm_ids'):
+        client._processed_dm_ids = set()
     
     try:
         # Erstelle Chat-Proxy-Client für DM-API-Zugriff
@@ -422,19 +426,25 @@ def get_direct_messages(client):
                 })
                 
                 for msg in messages.messages:
-                    # Prüfe ob Nachricht von anderem Nutzer
-                    if msg.sender.did != client.me.did:
-                        # Prüfe ob es eine "Per Direktnachricht senden" Nachricht ist
-                        # Diese haben normalerweise ein embed mit dem referenzierten Post
-                        if hasattr(msg, 'embed') and msg.embed:
-                            dms.append({
-                                'convo_id': convo.id,
-                                'message_id': msg.id,
-                                'sender': msg.sender.handle if hasattr(msg.sender, 'handle') else 'unknown',
-                                'text': msg.text if hasattr(msg, 'text') else "",
-                                'embed': msg.embed,
-                                'sent_at': msg.sent_at
-                            })
+                    # Überspringe Bot's eigene Nachrichten
+                    if msg.sender.did == client.me.did:
+                        continue
+                    
+                    # Überspringe bereits verarbeitete Nachrichten
+                    if msg.id in client._processed_dm_ids:
+                        continue
+                    
+                    # Prüfe ob es eine "Per Direktnachricht senden" Nachricht ist
+                    # Diese haben normalerweise ein embed mit dem referenzierten Post
+                    if hasattr(msg, 'embed') and msg.embed:
+                        dms.append({
+                            'convo_id': convo.id,
+                            'message_id': msg.id,
+                            'sender': msg.sender.handle if hasattr(msg.sender, 'handle') else 'unknown',
+                            'text': msg.text if hasattr(msg, 'text') else "",
+                            'embed': msg.embed,
+                            'sent_at': msg.sent_at
+                        })
         
         if dms:
             print(f"✅ {len(dms)} neue DM(s) mit Post-Referenz gefunden!")
@@ -578,12 +588,14 @@ def process_dm(client, dm, dry_run=False):
     5. Generiere Antwort mit Claude (basierend auf referenziertem Post)
     6. Poste Antwort ÖFFENTLICH auf Bluesky (als Reply auf den Post)
     7. Markiere DM als gelesen
+    8. Speichere Message-ID im Cache
     
     Args:
         dry_run: Wenn True, wird nichts wirklich gepostet
     """
     print(f"\n{'='*60}")
     print(f"💌 Neue DM von @{dm['sender']}")
+    print(f"🆔 Message-ID: {dm['message_id']}")
     if dm['text']:
         print(f"📝 Nachricht: {dm['text']}")
     print(f"{'='*60}")
@@ -593,9 +605,10 @@ def process_dm(client, dm, dry_run=False):
     
     if not referenced_post:
         print("⚠️ Kein Post in DM referenziert - überspringe")
-        # Markiere trotzdem als gelesen um nicht erneut zu verarbeiten
+        # Markiere trotzdem als verarbeitet um nicht erneut zu verarbeiten
         if not dry_run:
             mark_dm_as_read(client, dm['convo_id'])
+            client._processed_dm_ids.add(dm['message_id'])
         return False
     
     print(f"✅ Referenzierter Post von @{referenced_post['author']}:")
@@ -670,9 +683,10 @@ def process_dm(client, dm, dry_run=False):
     
     if not response:
         print("❌ Keine Antwort generiert - überspringe")
-        # Markiere trotzdem als gelesen
+        # Markiere trotzdem als verarbeitet
         if not dry_run:
             mark_dm_as_read(client, dm['convo_id'])
+            client._processed_dm_ids.add(dm['message_id'])
         return False
     
     # 5. Poste Antwort ÖFFENTLICH auf Bluesky (als Reply auf den Post)
@@ -680,10 +694,13 @@ def process_dm(client, dm, dry_run=False):
     success = reply_to_mention(client, referenced_post, response, dry_run=dry_run)
     
     # 6. Markiere DM als gelesen (WICHTIG!)
+    # 7. Speichere Message-ID im Cache (WICHTIG!)
     if not dry_run:
         mark_dm_as_read(client, dm['convo_id'])
+        client._processed_dm_ids.add(dm['message_id'])
+        print(f"✅ Message-ID {dm['message_id']} zum Cache hinzugefügt")
     else:
-        print("🧪 DRY RUN: DM wird NICHT als gelesen markiert")
+        print("🧪 DRY RUN: DM wird NICHT als gelesen markiert und NICHT gecacht")
     
     if success:
         print(f"\n✅ Post erfolgreich öffentlich beantwortet!")
